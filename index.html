@@ -104,7 +104,7 @@
     </div>
 
     <div class="info-warning">
-        <strong>Nota:</strong> Se o bairro for informado no CSV e não bater com nenhum bairro retornado pela API para aquela rua, o script preencherá a coluna <em>ceps_alternativos</em> com as opções disponíveis para você analisar.
+        <strong>Nota:</strong> Se o bairro for informado no CSV e não bater com nenhum bairro retornado pela API para aquela rua, o campo do CEP ficará vazio e as opções disponíveis aparecerão na coluna <em>ceps_alternativos</em> para avaliação manual.
     </div>
 
     <button id="btnBaixarModelo" class="btn-modelo">⬇️ Baixar CSV Modelo</button>
@@ -193,7 +193,6 @@
             return;
         }
 
-        // Coluna ceps_alternativos adicionada ao final
         let resultadosCSV = "uf;cidade;bairro_csv;logradouro;numero;cep_encontrado;validacao_logradouro;validacao_complemento;validacao_bairro;ceps_alternativos\n";
         const totalLinhas = linhas.length - 1;
 
@@ -225,6 +224,7 @@
                         
                         if (dadosBusca.length > 0) {
                             let cepSelecionado = null;
+                            let validacaoManual = false;
                             
                             // Lógica de Filtragem e Geração de Alternativos
                             if (bairroCsv) {
@@ -238,41 +238,43 @@
                                     cepSelecionado = match.cep;
                                 } else {
                                     // Bairro não encontrado entre os resultados da API.
-                                    cepSelecionado = dadosBusca[0].cep;
-                                    
-                                    // Mapeia todos os resultados encontrados para a coluna de alternativos
-                                    // Formato: "00000-000 (Nome do Bairro) | 11111-111 (Outro Bairro)"
+                                    // Sinaliza para validação manual
+                                    validacaoManual = true;
                                     const listaBairros = dadosBusca.map(item => `${item.cep} (${item.bairro || 'Sem Bairro'})`);
                                     cepsAlternativos = listaBairros.join(" | ");
                                 }
-                            }
-                            
-                            // Se não informou bairro no CSV, pega o primeiro e não preenche alternativos
-                            if (!cepSelecionado) {
+                            } else {
+                                // Se não informou bairro no CSV, pega o primeiro
                                 cepSelecionado = dadosBusca[0].cep;
                             }
                             
-                            cepEncontrado = cepSelecionado;
-                            
-                            await delay(1000); 
+                            if (cepSelecionado) {
+                                cepEncontrado = cepSelecionado;
+                                await delay(1000); 
 
-                            // --- ETAPA 2: Validação reversa ---
-                            const cepLimpo = cepEncontrado.replace(/\D/g, ''); 
-                            const urlVal = `https://viacep.com.br/ws/${cepLimpo}/json/`;
-                            const resVal = await fetch(urlVal);
+                                // --- ETAPA 2: Validação reversa ---
+                                const cepLimpo = cepEncontrado.replace(/\D/g, ''); 
+                                const urlVal = `https://viacep.com.br/ws/${cepLimpo}/json/`;
+                                const resVal = await fetch(urlVal);
 
-                            if (resVal.ok) {
-                                const dadosVal = await resVal.json();
-                                if (!dadosVal.erro) {
-                                    valLogradouro = dadosVal.logradouro || "";
-                                    valComplemento = dadosVal.complemento || ""; 
-                                    valBairro = dadosVal.bairro || "";
+                                if (resVal.ok) {
+                                    const dadosVal = await resVal.json();
+                                    if (!dadosVal.erro) {
+                                        valLogradouro = dadosVal.logradouro || "";
+                                        valComplemento = dadosVal.complemento || ""; 
+                                        valBairro = dadosVal.bairro || "";
+                                    } else {
+                                        valLogradouro = "CEP inválido na validação";
+                                    }
                                 } else {
-                                    valLogradouro = "CEP inválido na validação";
+                                    valLogradouro = "Erro na requisição de validação";
                                 }
-                            } else {
-                                valLogradouro = "Erro na requisição de validação";
+                            } else if (validacaoManual) {
+                                // O usuário informou um bairro, mas não houve "match"
+                                cepEncontrado = ""; // Deixa o CEP vazio
+                                valLogradouro = "Verifique os CEPs alternativos";
                             }
+
                         } else {
                             cepEncontrado = "Logradouro não localizado";
                         }
