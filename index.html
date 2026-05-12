@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Buscador de CEP em Lote - Validação Dupla</title>
+    <title>Buscador de CEP em Lote - Busca Inteligente</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -99,19 +99,18 @@
     <h2>Busca e Validação de CEP</h2>
     
     <div class="info">
-        O seu CSV deve conter um cabeçalho na primeira linha com as colunas (independentemente da ordem):<br>
-        <strong>uf;cidade;logradouro;numero</strong>
+        O seu CSV deve conter um cabeçalho na primeira linha com as colunas (a coluna bairro é opcional, mas ajuda na precisão):<br>
+        <strong>uf;cidade;bairro;logradouro;numero</strong>
     </div>
 
     <div class="info-warning">
-        <strong>Nota:</strong> O script fará 2 consultas por linha (Busca pelo texto + Validação pelo CEP). Ruas longas podem ter múltiplos CEPs (por quarteirão/lado); o script validará o 1º CEP retornado e exibirá as regras de numeração na coluna <em>validacao_complemento</em>.
+        <strong>Nota:</strong> Se o bairro for preenchido, o script procurará na lista de resultados da rua o CEP específico daquele bairro. Caso não encontre ou o bairro esteja em branco, usará o primeiro CEP da rua.
     </div>
 
     <button id="btnBaixarModelo" class="btn-modelo">⬇️ Baixar CSV Modelo</button>
 
     <hr style="border: 0; border-top: 1px solid #eee; margin: 25px 0;">
 
-    <!-- Título adicionado aqui -->
     <h3>Verificar CSV</h3>
     
     <input type="file" id="csvFileInput" accept=".csv">
@@ -132,14 +131,20 @@
     const progressBar = document.getElementById('progressBar');
     const progressFill = document.getElementById('progressFill');
 
-    // Função para adicionar delay e não derrubar a API (Block de IP)
+    // Função para adicionar delay
     const delay = ms => new Promise(res => setTimeout(res, ms));
 
-    // Escapar aspas para não quebrar a formatação do CSV
+    // Escapar aspas do CSV
     const escapeCSV = str => str ? str.replace(/"/g, '""') : '';
 
+    // Normalizar strings (remover acentos e colocar minúsculo para comparar bairros)
+    const normalizeStr = str => {
+        if (!str) return "";
+        return str.normalize('NFD').replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+    };
+
     btnBaixarModelo.addEventListener('click', () => {
-        const conteudoModelo = "uf;cidade;logradouro;numero\nSP;São Paulo;Avenida Paulista;1000\nRJ;Rio de Janeiro;Avenida Rio Branco;156\nMG;Belo Horizonte;Avenida Afonso Pena;500";
+        const conteudoModelo = "uf;cidade;bairro;logradouro;numero\nSP;São Paulo;Bela Vista;Avenida Paulista;1000\nSP;São Paulo;Consolação;Avenida Paulista;2000\nRJ;Rio de Janeiro;Centro;Avenida Rio Branco;156\nMG;Belo Horizonte;;Avenida Afonso Pena;500";
         baixarCSV(conteudoModelo, 'modelo_busca_cep.csv');
     });
 
@@ -180,6 +185,7 @@
         const idxUF = headers.indexOf('uf');
         const idxCidade = headers.indexOf('cidade');
         const idxLogradouro = headers.indexOf('logradouro');
+        const idxBairro = headers.indexOf('bairro'); // Nova coluna
         const idxNumero = headers.indexOf('numero');
 
         if (idxUF === -1 || idxCidade === -1 || idxLogradouro === -1) {
@@ -187,8 +193,7 @@
             return;
         }
 
-        // Novo cabeçalho de resposta
-        let resultadosCSV = "uf;cidade;logradouro;numero;cep_encontrado;validacao_logradouro;validacao_complemento;validacao_bairro\n";
+        let resultadosCSV = "uf;cidade;bairro_csv;logradouro;numero;cep_encontrado;validacao_logradouro;validacao_complemento;validacao_bairro\n";
         const totalLinhas = linhas.length - 1;
 
         for (let i = 1; i <= totalLinhas; i++) {
@@ -196,6 +201,7 @@
             const uf = colunas[idxUF]?.trim();
             const cidade = colunas[idxCidade]?.trim();
             const logradouro = colunas[idxLogradouro]?.trim();
+            const bairroCsv = idxBairro !== -1 ? colunas[idxBairro]?.trim() : '';
             const numero = idxNumero !== -1 ? colunas[idxNumero]?.trim() : '';
 
             statusDiv.innerText = `Processando ${i} de ${totalLinhas}: ${logradouro}...`;
@@ -208,21 +214,42 @@
 
             if (uf && uf.length === 2 && cidade && logradouro && logradouro.length >= 3) {
                 try {
-                    // --- ETAPA 1: Busca pelo endereço ---
+                    // --- ETAPA 1: Busca ---
                     const urlBusca = `https://viacep.com.br/ws/${uf}/${encodeURIComponent(cidade)}/${encodeURIComponent(logradouro)}/json/`;
                     const resBusca = await fetch(urlBusca);
                     
                     if (resBusca.ok) {
                         const dadosBusca = await resBusca.json();
+                        
                         if (dadosBusca.length > 0) {
-                            // Pega o primeiro CEP retornado
-                            cepEncontrado = dadosBusca[0].cep; 
                             
-                            // Delay entre as duas chamadas da mesma linha
+                            // Lógica de Filtragem por Bairro
+                            let cepSelecionado = null;
+                            
+                            if (bairroCsv) {
+                                const bairroCsvNorm = normalizeStr(bairroCsv);
+                                // Tenta encontrar um bairro na API que contenha o bairro do CSV ou vice-versa
+                                const match = dadosBusca.find(item => {
+                                    const bairroApiNorm = normalizeStr(item.bairro);
+                                    return bairroApiNorm.includes(bairroCsvNorm) || bairroCsvNorm.includes(bairroApiNorm);
+                                });
+                                
+                                if (match) {
+                                    cepSelecionado = match.cep;
+                                }
+                            }
+                            
+                            // Se não encontrou o bairro específico (ou se não foi passado), pega o primeiro
+                            if (!cepSelecionado) {
+                                cepSelecionado = dadosBusca[0].cep;
+                            }
+                            
+                            cepEncontrado = cepSelecionado;
+                            
                             await delay(1000); 
 
-                            // --- ETAPA 2: Validação reversa pelo CEP ---
-                            const cepLimpo = cepEncontrado.replace(/\D/g, ''); // Remove o hífen
+                            // --- ETAPA 2: Validação reversa ---
+                            const cepLimpo = cepEncontrado.replace(/\D/g, ''); 
                             const urlVal = `https://viacep.com.br/ws/${cepLimpo}/json/`;
                             const resVal = await fetch(urlVal);
 
@@ -230,7 +257,7 @@
                                 const dadosVal = await resVal.json();
                                 if (!dadosVal.erro) {
                                     valLogradouro = dadosVal.logradouro || "";
-                                    valComplemento = dadosVal.complemento || ""; // Aqui vem ímpar/par/limites
+                                    valComplemento = dadosVal.complemento || ""; 
                                     valBairro = dadosVal.bairro || "";
                                 } else {
                                     valLogradouro = "CEP inválido na validação";
@@ -251,15 +278,13 @@
                 cepEncontrado = "Dados em branco ou inválidos";
             }
 
-            // Monta a linha do CSV com aspas para evitar quebra caso haja vírgulas/ponto e vírgula nos nomes
-            resultadosCSV += `"${escapeCSV(uf)}";"${escapeCSV(cidade)}";"${escapeCSV(logradouro)}";"${escapeCSV(numero)}";"${cepEncontrado}";"${escapeCSV(valLogradouro)}";"${escapeCSV(valComplemento)}";"${escapeCSV(valBairro)}"\n`;
+            resultadosCSV += `"${escapeCSV(uf)}";"${escapeCSV(cidade)}";"${escapeCSV(bairroCsv)}";"${escapeCSV(logradouro)}";"${escapeCSV(numero)}";"${cepEncontrado}";"${escapeCSV(valLogradouro)}";"${escapeCSV(valComplemento)}";"${escapeCSV(valBairro)}"\n`;
 
-            // Pausa de 1 segundo antes de ir para a próxima linha do CSV
             await delay(1000); 
         }
 
         statusDiv.innerText = "Processamento concluído! O download iniciará automaticamente.";
-        baixarCSV(resultadosCSV, 'resultado_ceps_validado.csv');
+        baixarCSV(resultadosCSV, 'resultado_ceps_inteligente.csv');
         progressFill.style.width = `100%`;
     }
 
