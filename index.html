@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Buscador de CEP em Lote - ViaCEP</title>
+    <title>Buscador de CEP em Lote - Validação Dupla</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -19,7 +19,7 @@
             border-radius: 10px;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
             width: 100%;
-            max-width: 600px;
+            max-width: 650px;
         }
         h2 { margin-top: 0; color: #2c3e50; }
         .info {
@@ -28,6 +28,14 @@
             padding: 10px 15px;
             font-size: 0.9em;
             margin-bottom: 20px;
+        }
+        .info-warning {
+            background-color: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 10px 15px;
+            font-size: 0.85em;
+            margin-bottom: 20px;
+            color: #856404;
         }
         input[type="file"] {
             display: block;
@@ -44,23 +52,24 @@
             cursor: pointer;
             width: 100%;
             margin-bottom: 10px;
+            transition: background-color 0.3s;
         }
         button:disabled { background-color: #95a5a6; cursor: not-allowed; }
         button.btn-processar:hover:not(:disabled) { background-color: #2ecc71; }
         
-        /* Estilos do botão de modelo */
         button.btn-modelo {
             background-color: #3498db;
             font-size: 14px;
             padding: 10px 15px;
         }
-        button.btn-modelo:hover { background-color: #2980b9; }
+        button.btn-modelo:hover:not(:disabled) { background-color: #2980b9; }
 
         #status {
             margin-top: 20px;
             font-weight: bold;
             text-align: center;
             min-height: 24px;
+            font-size: 0.9em;
         }
         .progress-bar {
             width: 100%;
@@ -81,10 +90,15 @@
 <body>
 
 <div class="card">
-    <h2>Busca de CEP em Lote</h2>
+    <h2>Busca e Validação de CEP</h2>
+    
     <div class="info">
-        O seu CSV deve conter um cabeçalho na primeira linha com as colunas exatas (independentemente da ordem):<br>
+        O seu CSV deve conter um cabeçalho na primeira linha com as colunas (independentemente da ordem):<br>
         <strong>uf;cidade;logradouro;numero</strong>
+    </div>
+
+    <div class="info-warning">
+        <strong>Nota:</strong> O script fará 2 consultas por linha (Busca pelo texto + Validação pelo CEP). Ruas longas podem ter múltiplos CEPs (por quarteirão/lado); o script validará o 1º CEP retornado e exibirá as regras de numeração na coluna <em>validacao_complemento</em>.
     </div>
 
     <button id="btnBaixarModelo" class="btn-modelo">⬇️ Baixar CSV Modelo</button>
@@ -109,16 +123,17 @@
     const progressBar = document.getElementById('progressBar');
     const progressFill = document.getElementById('progressFill');
 
-    // Função para adicionar delay e não ser bloqueado pelo ViaCEP
+    // Função para adicionar delay e não derrubar a API (Block de IP)
     const delay = ms => new Promise(res => setTimeout(res, ms));
 
-    // Ação do botão de baixar modelo
+    // Escapar aspas para não quebrar a formatação do CSV
+    const escapeCSV = str => str ? str.replace(/"/g, '""') : '';
+
     btnBaixarModelo.addEventListener('click', () => {
         const conteudoModelo = "uf;cidade;logradouro;numero\nSP;São Paulo;Avenida Paulista;1000\nRJ;Rio de Janeiro;Avenida Rio Branco;156\nMG;Belo Horizonte;Avenida Afonso Pena;500";
         baixarCSV(conteudoModelo, 'modelo_busca_cep.csv');
     });
 
-    // Ação do botão de processar CSV
     btnProcessar.addEventListener('click', () => {
         const file = fileInput.files[0];
         if (!file) {
@@ -163,8 +178,9 @@
             return;
         }
 
-        let resultadosCSV = "uf;cidade;logradouro;numero;cep_resultado\n";
-        const totalLinhas = linhas.length - 1; // Tirando o cabeçalho
+        // Novo cabeçalho de resposta
+        let resultadosCSV = "uf;cidade;logradouro;numero;cep_encontrado;validacao_logradouro;validacao_complemento;validacao_bairro\n";
+        const totalLinhas = linhas.length - 1;
 
         for (let i = 1; i <= totalLinhas; i++) {
             const colunas = linhas[i].split(separador);
@@ -176,36 +192,65 @@
             statusDiv.innerText = `Processando ${i} de ${totalLinhas}: ${logradouro}...`;
             progressFill.style.width = `${(i / totalLinhas) * 100}%`;
 
-            let cepEncontrado = "Nao encontrado / Erro";
+            let cepEncontrado = "Nao encontrado";
+            let valLogradouro = "";
+            let valComplemento = "";
+            let valBairro = "";
 
             if (uf && uf.length === 2 && cidade && logradouro && logradouro.length >= 3) {
                 try {
-                    const url = `https://viacep.com.br/ws/${uf}/${encodeURIComponent(cidade)}/${encodeURIComponent(logradouro)}/json/`;
-                    const response = await fetch(url);
+                    // --- ETAPA 1: Busca pelo endereço ---
+                    const urlBusca = `https://viacep.com.br/ws/${uf}/${encodeURIComponent(cidade)}/${encodeURIComponent(logradouro)}/json/`;
+                    const resBusca = await fetch(urlBusca);
                     
-                    if (response.ok) {
-                        const dados = await response.json();
-                        if (dados.length > 0) {
-                            cepEncontrado = dados[0].cep; 
+                    if (resBusca.ok) {
+                        const dadosBusca = await resBusca.json();
+                        if (dadosBusca.length > 0) {
+                            // Pega o primeiro CEP retornado
+                            cepEncontrado = dadosBusca[0].cep; 
+                            
+                            // Delay entre as duas chamadas da mesma linha
+                            await delay(1000); 
+
+                            // --- ETAPA 2: Validação reversa pelo CEP ---
+                            const cepLimpo = cepEncontrado.replace(/\D/g, ''); // Remove o hífen
+                            const urlVal = `https://viacep.com.br/ws/${cepLimpo}/json/`;
+                            const resVal = await fetch(urlVal);
+
+                            if (resVal.ok) {
+                                const dadosVal = await resVal.json();
+                                if (!dadosVal.erro) {
+                                    valLogradouro = dadosVal.logradouro || "";
+                                    valComplemento = dadosVal.complemento || ""; // Aqui vem ímpar/par/limites
+                                    valBairro = dadosVal.bairro || "";
+                                } else {
+                                    valLogradouro = "CEP inválido na validação";
+                                }
+                            } else {
+                                valLogradouro = "Erro na requisição de validação";
+                            }
                         } else {
                             cepEncontrado = "Logradouro não localizado";
                         }
+                    } else {
+                        cepEncontrado = "Erro na API (Busca)";
                     }
                 } catch (error) {
-                    cepEncontrado = "Falha na API";
+                    cepEncontrado = "Falha de conexão";
                 }
             } else {
-                cepEncontrado = "Dados inválidos para busca";
+                cepEncontrado = "Dados em branco ou inválidos";
             }
 
-            resultadosCSV += `"${uf}";"${cidade}";"${logradouro}";"${numero}";"${cepEncontrado}"\n`;
+            // Monta a linha do CSV com aspas para evitar quebra caso haja vírgulas/ponto e vírgula nos nomes
+            resultadosCSV += `"${escapeCSV(uf)}";"${escapeCSV(cidade)}";"${escapeCSV(logradouro)}";"${escapeCSV(numero)}";"${cepEncontrado}";"${escapeCSV(valLogradouro)}";"${escapeCSV(valComplemento)}";"${escapeCSV(valBairro)}"\n`;
 
-            // Pausa de 1 segundo (1000ms)
+            // Pausa de 1 segundo antes de ir para a próxima linha do CSV
             await delay(1000); 
         }
 
-        statusDiv.innerText = "Concluído! O download começará em instantes.";
-        baixarCSV(resultadosCSV, 'resultado_ceps.csv');
+        statusDiv.innerText = "Processamento concluído! O download iniciará automaticamente.";
+        baixarCSV(resultadosCSV, 'resultado_ceps_validado.csv');
         progressFill.style.width = `100%`;
     }
 
