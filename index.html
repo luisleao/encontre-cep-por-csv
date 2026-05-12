@@ -104,7 +104,7 @@
     </div>
 
     <div class="info-warning">
-        <strong>Nota:</strong> Se o bairro for preenchido, o script procurará na lista de resultados da rua o CEP específico daquele bairro. Caso não encontre ou o bairro esteja em branco, usará o primeiro CEP da rua.
+        <strong>Nota:</strong> Se o bairro for informado no CSV e não bater com nenhum bairro retornado pela API para aquela rua, o script preencherá a coluna <em>ceps_alternativos</em> com as opções disponíveis para você analisar.
     </div>
 
     <button id="btnBaixarModelo" class="btn-modelo">⬇️ Baixar CSV Modelo</button>
@@ -144,7 +144,7 @@
     };
 
     btnBaixarModelo.addEventListener('click', () => {
-        const conteudoModelo = "uf;cidade;bairro;logradouro;numero\nSP;São Paulo;Bela Vista;Avenida Paulista;1000\nSP;São Paulo;Consolação;Avenida Paulista;2000\nRJ;Rio de Janeiro;Centro;Avenida Rio Branco;156\nMG;Belo Horizonte;;Avenida Afonso Pena;500";
+        const conteudoModelo = "uf;cidade;bairro;logradouro;numero\nSP;São Paulo;Bela Vista;Avenida Paulista;1000\nSP;São Paulo;Consolação;Avenida Paulista;2000\nRJ;Rio de Janeiro;Bairro Inexistente;Avenida Rio Branco;156\nMG;Belo Horizonte;;Avenida Afonso Pena;500";
         baixarCSV(conteudoModelo, 'modelo_busca_cep.csv');
     });
 
@@ -185,7 +185,7 @@
         const idxUF = headers.indexOf('uf');
         const idxCidade = headers.indexOf('cidade');
         const idxLogradouro = headers.indexOf('logradouro');
-        const idxBairro = headers.indexOf('bairro'); // Nova coluna
+        const idxBairro = headers.indexOf('bairro'); 
         const idxNumero = headers.indexOf('numero');
 
         if (idxUF === -1 || idxCidade === -1 || idxLogradouro === -1) {
@@ -193,7 +193,8 @@
             return;
         }
 
-        let resultadosCSV = "uf;cidade;bairro_csv;logradouro;numero;cep_encontrado;validacao_logradouro;validacao_complemento;validacao_bairro\n";
+        // Coluna ceps_alternativos adicionada ao final
+        let resultadosCSV = "uf;cidade;bairro_csv;logradouro;numero;cep_encontrado;validacao_logradouro;validacao_complemento;validacao_bairro;ceps_alternativos\n";
         const totalLinhas = linhas.length - 1;
 
         for (let i = 1; i <= totalLinhas; i++) {
@@ -211,6 +212,7 @@
             let valLogradouro = "";
             let valComplemento = "";
             let valBairro = "";
+            let cepsAlternativos = "";
 
             if (uf && uf.length === 2 && cidade && logradouro && logradouro.length >= 3) {
                 try {
@@ -222,13 +224,11 @@
                         const dadosBusca = await resBusca.json();
                         
                         if (dadosBusca.length > 0) {
-                            
-                            // Lógica de Filtragem por Bairro
                             let cepSelecionado = null;
                             
+                            // Lógica de Filtragem e Geração de Alternativos
                             if (bairroCsv) {
                                 const bairroCsvNorm = normalizeStr(bairroCsv);
-                                // Tenta encontrar um bairro na API que contenha o bairro do CSV ou vice-versa
                                 const match = dadosBusca.find(item => {
                                     const bairroApiNorm = normalizeStr(item.bairro);
                                     return bairroApiNorm.includes(bairroCsvNorm) || bairroCsvNorm.includes(bairroApiNorm);
@@ -236,10 +236,18 @@
                                 
                                 if (match) {
                                     cepSelecionado = match.cep;
+                                } else {
+                                    // Bairro não encontrado entre os resultados da API.
+                                    cepSelecionado = dadosBusca[0].cep;
+                                    
+                                    // Mapeia todos os resultados encontrados para a coluna de alternativos
+                                    // Formato: "00000-000 (Nome do Bairro) | 11111-111 (Outro Bairro)"
+                                    const listaBairros = dadosBusca.map(item => `${item.cep} (${item.bairro || 'Sem Bairro'})`);
+                                    cepsAlternativos = listaBairros.join(" | ");
                                 }
                             }
                             
-                            // Se não encontrou o bairro específico (ou se não foi passado), pega o primeiro
+                            // Se não informou bairro no CSV, pega o primeiro e não preenche alternativos
                             if (!cepSelecionado) {
                                 cepSelecionado = dadosBusca[0].cep;
                             }
@@ -278,13 +286,13 @@
                 cepEncontrado = "Dados em branco ou inválidos";
             }
 
-            resultadosCSV += `"${escapeCSV(uf)}";"${escapeCSV(cidade)}";"${escapeCSV(bairroCsv)}";"${escapeCSV(logradouro)}";"${escapeCSV(numero)}";"${cepEncontrado}";"${escapeCSV(valLogradouro)}";"${escapeCSV(valComplemento)}";"${escapeCSV(valBairro)}"\n`;
+            resultadosCSV += `"${escapeCSV(uf)}";"${escapeCSV(cidade)}";"${escapeCSV(bairroCsv)}";"${escapeCSV(logradouro)}";"${escapeCSV(numero)}";"${cepEncontrado}";"${escapeCSV(valLogradouro)}";"${escapeCSV(valComplemento)}";"${escapeCSV(valBairro)}";"${escapeCSV(cepsAlternativos)}"\n`;
 
             await delay(1000); 
         }
 
         statusDiv.innerText = "Processamento concluído! O download iniciará automaticamente.";
-        baixarCSV(resultadosCSV, 'resultado_ceps_inteligente.csv');
+        baixarCSV(resultadosCSV, 'resultado_ceps_final.csv');
         progressFill.style.width = `100%`;
     }
 
